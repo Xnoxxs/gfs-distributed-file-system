@@ -23,8 +23,19 @@ class GFSClient:
         self._timeout = timeout
 
     # ---- helpers ----
+    @staticmethod
+    def _channel_options():
+        # Default gRPC message limit is 4 MB.  A CreateFileResponse for a 1 GB
+        # file contains ~977K ChunkPlacement entries and weighs ~90 MB, so bump
+        # the limit to 256 MB.
+        return [
+            ("grpc.max_send_message_length", 256 * 1024 * 1024),
+            ("grpc.max_receive_message_length", 256 * 1024 * 1024),
+        ]
+
     def _naming(self):
-        channel = grpc.insecure_channel(self._naming_addr)
+        channel = grpc.insecure_channel(self._naming_addr,
+                                        options=self._channel_options())
         return channel, gfs_pb2_grpc.NamingServerStub(channel)
 
     @staticmethod

@@ -165,7 +165,13 @@ def serve() -> None:
 
     metrics.start_metrics_server_from_env()
     servicer = StorageServicer(data_dir, self_addr)
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=16))
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=16),
+        options=[
+            ("grpc.max_send_message_length", 256 * 1024 * 1024),
+            ("grpc.max_receive_message_length", 256 * 1024 * 1024),
+        ],
+    )
     gfs_pb2_grpc.add_StorageServerServicer_to_server(servicer, server)
     server.add_insecure_port(f"[::]:{port}")
     server.start()
