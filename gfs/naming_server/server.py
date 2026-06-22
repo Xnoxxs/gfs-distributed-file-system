@@ -127,20 +127,22 @@ class NamingServicer(gfs_pb2_grpc.NamingServerServicer):
 
     def _cleanup_loop(self, interval: float) -> None:
         """Periodically garbage-collect pending files whose writes were
-        interrupted (client crashed mid-upload)."""
+        interrupted (client crashed mid-upload).  Metadata is removed first
+        so the file disappears immediately; chunk deletion on storage servers
+        is best-effort and happens after."""
         while not self._stop_healing.wait(interval):
             try:
                 stale = self._store.list_stale_pending(self._cleanup_max_age)
                 for fm in stale:
-                    # Best-effort: tell storage servers to drop orphan chunks.
-                    for chunk in fm.chunks:
-                        for addr in chunk.locations:
-                            _delete_chunk_on(addr, chunk.chunk_id)
                     self._store.delete_file(fm.filename)
                     logger.info(
                         "cleanup: removed stale pending file '%s' "
                         "(%d chunks, age > %.0fs)",
                         fm.filename, len(fm.chunks), self._cleanup_max_age)
+                    # Best-effort chunk cleanup — don't block the loop.
+                    for chunk in fm.chunks:
+                        for addr in chunk.locations:
+                            _delete_chunk_on(addr, chunk.chunk_id)
             except Exception:
                 logger.exception("pending-file cleanup failed")
 
