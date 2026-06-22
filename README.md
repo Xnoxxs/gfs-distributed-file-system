@@ -12,7 +12,8 @@ The three ideas from class:
 - **Separation of concerns:** the metadata/naming layer is independent from the storage layer.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the design and the full
-fault-tolerance analysis.
+fault-tolerance analysis, and [`docs/simulation.md`](docs/simulation.md) for
+manual load, large-file, failure, and network simulations.
 
 ---
 
@@ -204,5 +205,6 @@ tests/test_gfs.py          end-to-end tests incl. fault tolerance
 docker-compose.yml         1 naming + 4 storage + client helper
 Dockerfile                 single image for all roles
 docs/ARCHITECTURE.md       design + fault-tolerance analysis
+docs/simulation.md         manual simulation commands and scenarios
 docs/requirements.md       the assignment
 ```

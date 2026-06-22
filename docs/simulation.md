@@ -1,0 +1,379 @@
+# Simulation Guide
+
+This guide shows how to manually simulate load, large files, fault tolerance,
+and network problems against the Docker Compose cluster. Commands use fish
+shell syntax.
+
+The default cluster is:
+
+- 1 naming server
+- 4 storage servers
+- replication factor 3
+- 1 helper `client` container
+
+With replication factor 3, the system should survive one storage-server failure
+for existing replicated files. Some reads may survive two storage-server
+failures if at least one replica remains for every chunk, but the cluster cannot
+restore full replication until at least three storage servers are live.
+
+---
+
+## 1. Start from a clean cluster
+
+```fish
+docker compose down -v
+docker compose up --build -d
+docker compose ps
+```
+
+Watch the naming server in a separate terminal:
+
+```fish
+docker compose logs -f naming
+```
+
+Basic smoke test:
+
+```fish
+docker compose exec client python -m gfs.client create /samples/hello.txt hello.txt
+docker compose exec client python -m gfs.client read hello.txt
+docker compose exec client python -m gfs.client size hello.txt
+docker compose exec client python -m gfs.client ls
+```
+
+---
+
+## 2. Simulate multiple clients
+
+Use parallel `docker compose exec -T client ...` commands. `-T` disables TTY
+allocation, which works better for background jobs.
+
+Create many files concurrently:
+
+```fish
+for i in (seq 1 20)
+    docker compose exec -T client python -m gfs.client create /samples/hello.txt "hello-$i.txt" &
+end
+wait
+```
+
+Read them concurrently:
+
+```fish
+mkdir -p /tmp/gfs-sim
+
+for i in (seq 1 20)
+    docker compose exec -T client python -m gfs.client read "hello-$i.txt" > "/tmp/gfs-sim/hello-$i.txt" &
+end
+wait
+```
+
+Check that the files exist in metadata:
+
+```fish
+docker compose exec client python -m gfs.client ls
+```
+
+Expected result: all creates and reads complete successfully.
+
+---
+
+## 3. Simulate large files
+
+Files are split into 1 KB chunks. A 10 MB text file creates about 10,240 chunks,
+so it is enough to exercise chunk placement, metadata growth, and replica reads.
+
+Create a large text sample on the host:
+
+```fish
+uv run python -c '
+from pathlib import Path
+
+target = Path("samples/large.txt")
+line = "hello distributed file system simulation\n"
+target.write_text(line * 300_000, encoding="utf-8")
+print(target, target.stat().st_size, "bytes")
+'
+```
+
+Upload it:
+
+```fish
+docker compose exec client python -m gfs.client create /samples/large.txt large.txt
+docker compose exec client python -m gfs.client size large.txt
+```
+
+Read it back and compare hashes:
+
+```fish
+docker compose exec client python -m gfs.client read large.txt /tmp/large-out.txt
+docker compose cp client:/tmp/large-out.txt /tmp/gfs-sim-large-out.txt
+
+shasum -a 256 samples/large.txt /tmp/gfs-sim-large-out.txt
+```
+
+Expected result: both hashes are identical.
+
+---
+
+## 4. Simulate storage-server failure
+
+Create a file first:
+
+```fish
+docker compose exec client python -m gfs.client create /samples/hello.txt failover.txt
+```
+
+Stop one storage server:
+
+```fish
+docker compose stop storage1
+```
+
+Read while the server is down:
+
+```fish
+docker compose exec client python -m gfs.client read failover.txt
+docker compose exec client python -m gfs.client read large.txt /tmp/large-after-storage1-down.txt
+```
+
+Inspect naming-server logs:
+
+```fish
+docker compose logs naming
+```
+
+Restart the server:
+
+```fish
+docker compose start storage1
+docker compose logs naming
+```
+
+Expected result:
+
+- reads still work while one storage server is down
+- naming server marks the server unavailable after missed heartbeats
+- after restart, storage re-registers and the cluster heals back toward the
+  target replication factor
+
+---
+
+## 5. Simulate the survivability boundary
+
+Stop two storage servers:
+
+```fish
+docker compose stop storage1 storage2
+```
+
+Try reading existing files:
+
+```fish
+docker compose exec client python -m gfs.client read failover.txt
+docker compose exec client python -m gfs.client read large.txt /tmp/large-after-two-down.txt
+```
+
+Try creating a new file:
+
+```fish
+docker compose exec client python -m gfs.client create /samples/hello.txt created-with-two-down.txt
+```
+
+Restart the servers:
+
+```fish
+docker compose start storage1 storage2
+```
+
+Expected result:
+
+- some reads may still work if every chunk has at least one live replica
+- reads fail if all replicas for any required chunk are unavailable
+- new creates should fail while fewer than 3 storage servers are live, because
+  the naming server cannot place 3 distinct replicas
+
+---
+
+## 6. Simulate naming-server failure
+
+Stop the naming server:
+
+```fish
+docker compose stop naming
+```
+
+Try client operations:
+
+```fish
+docker compose exec client python -m gfs.client ls
+docker compose exec client python -m gfs.client read failover.txt
+docker compose exec client python -m gfs.client create /samples/hello.txt while-naming-down.txt
+```
+
+Restart the naming server:
+
+```fish
+docker compose start naming
+docker compose logs naming
+```
+
+After storage servers re-register, verify data is still readable:
+
+```fish
+docker compose exec client python -m gfs.client ls
+docker compose exec client python -m gfs.client read failover.txt
+```
+
+Expected result:
+
+- client operations fail while the naming server is down
+- storage chunk data remains on disk
+- metadata survives because the naming server uses the `naming-data` volume
+- reads work again after restart and re-registration
+
+The naming server is a single point of failure for availability.
+
+---
+
+## 7. Simulate network problems without Toxiproxy
+
+Docker can simulate complete network loss or a frozen process. These are useful
+for demos and do not require extra services.
+
+### Pause a storage server
+
+```fish
+docker compose pause storage1
+docker compose exec client python -m gfs.client read failover.txt
+docker compose unpause storage1
+```
+
+Expected result: the server stops responding while paused, then resumes.
+
+### Disconnect a storage server from the Compose network
+
+Find the network and container names:
+
+```fish
+docker network ls
+docker compose ps
+```
+
+The default network is usually named after the directory, for example:
+
+```text
+distributed-file-system_default
+```
+
+Disconnect `storage1`:
+
+```fish
+docker network disconnect distributed-file-system_default distributed-file-system-storage1-1
+```
+
+Run a read:
+
+```fish
+docker compose exec client python -m gfs.client read failover.txt
+```
+
+Reconnect it:
+
+```fish
+docker network connect distributed-file-system_default distributed-file-system-storage1-1
+```
+
+If your Compose project name is different, replace the network and container
+names with the values shown by `docker network ls` and `docker compose ps`.
+
+Expected result: the naming server eventually treats the disconnected storage
+server as unavailable, and reads should use other replicas.
+
+---
+
+## 8. Optional: simulate latency and timeouts with Toxiproxy
+
+Toxiproxy is useful when you need partial network degradation instead of total
+failure, for example:
+
+- high latency
+- connection timeout
+- limited bandwidth
+- temporary network cuts
+
+This project does not route traffic through Toxiproxy by default. To use it,
+each advertised storage address must point to a Toxiproxy endpoint, and that
+proxy must forward traffic to the real storage server.
+
+Example shape for `storage1`:
+
+```text
+client/naming -> toxiproxy-storage1:15061 -> storage1:50061
+```
+
+That means `storage1` would advertise:
+
+```yaml
+ADVERTISE_ADDR: "toxiproxy-storage1:15061"
+```
+
+Then the Toxiproxy service would expose a proxy named `storage1` listening on
+`15061` and forwarding to `storage1:50061`.
+
+Typical toxic commands:
+
+```fish
+toxiproxy-cli toxic add storage1 -t latency -a latency=1000
+toxiproxy-cli toxic add storage1 -t bandwidth -a rate=10
+toxiproxy-cli toxic add storage1 -t timeout
+toxiproxy-cli toxic remove storage1 -n latency_downstream
+```
+
+Use Toxiproxy when the question is "what happens when RPCs are slow or flaky?"
+Use `docker compose stop`, `pause`, or `docker network disconnect` when the
+question is "what happens when a server disappears?"
+
+---
+
+## 9. Cleanup
+
+Stop containers but keep volumes:
+
+```fish
+docker compose down
+```
+
+Stop containers and delete all stored data:
+
+```fish
+docker compose down -v
+```
+
+Remove temporary host outputs:
+
+```fish
+rm -rf /tmp/gfs-sim /tmp/gfs-sim-large-out.txt
+```
+
+---
+
+## 10. What to record during a simulation
+
+For a report or demo, record:
+
+- command used to inject the failure
+- whether create/read/size/delete succeeded
+- `docker compose ps`
+- relevant `docker compose logs naming` output
+- file hash before and after read-back for large files
+- how long recovery took after `docker compose start`
+
+The most important correctness check is byte equality:
+
+```fish
+shasum -a 256 samples/large.txt /tmp/gfs-sim-large-out.txt
+```
+
+If the hashes differ, the simulation found a correctness bug even if the client
+command returned successfully.
