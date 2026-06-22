@@ -68,11 +68,14 @@ class NamingServicer(gfs_pb2_grpc.NamingServerServicer):
     def __init__(self, store: MetadataStore, replication_factor: int,
                  enable_healing: bool = True,
                  heal_interval: float = config.HEAL_INTERVAL,
-                 metrics_interval: float = 10.0):
+                 metrics_interval: float = 10.0,
+                 cleanup_interval: float = 15.0,
+                 cleanup_max_age: float = 60.0):
         self._store = store
         self._replication = replication_factor
         self._registry = _StorageRegistry(time.monotonic)
         self._heal_interval = heal_interval
+        self._cleanup_max_age = cleanup_max_age
         self._stop_healing = threading.Event()
         if enable_healing:
             self._healer = threading.Thread(target=self._heal_loop, daemon=True)
@@ -83,6 +86,10 @@ class NamingServicer(gfs_pb2_grpc.NamingServerServicer):
         self._metrics_thread = threading.Thread(
             target=self._metrics_loop, daemon=True)
         self._metrics_thread.start()
+        # Background cleanup of pending files left behind by interrupted writes.
+        self._cleanup_thread = threading.Thread(
+            target=self._cleanup_loop, args=(cleanup_interval,), daemon=True)
+        self._cleanup_thread.start()
 
     # ---------- membership ----------
     def RegisterStorage(self, request, context):
@@ -117,6 +124,25 @@ class NamingServicer(gfs_pb2_grpc.NamingServerServicer):
                 self._refresh_cluster_metrics()
             except Exception:
                 logger.exception("metrics refresh failed")
+
+    def _cleanup_loop(self, interval: float) -> None:
+        """Periodically garbage-collect pending files whose writes were
+        interrupted (client crashed mid-upload)."""
+        while not self._stop_healing.wait(interval):
+            try:
+                stale = self._store.list_stale_pending(self._cleanup_max_age)
+                for fm in stale:
+                    # Best-effort: tell storage servers to drop orphan chunks.
+                    for chunk in fm.chunks:
+                        for addr in chunk.locations:
+                            _delete_chunk_on(addr, chunk.chunk_id)
+                    self._store.delete_file(fm.filename)
+                    logger.info(
+                        "cleanup: removed stale pending file '%s' "
+                        "(%d chunks, age > %.0fs)",
+                        fm.filename, len(fm.chunks), self._cleanup_max_age)
+            except Exception:
+                logger.exception("pending-file cleanup failed")
 
     def heal_once(self) -> int:
         """Repair committed chunks that are below the live replica target."""

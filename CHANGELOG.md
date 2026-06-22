@@ -4,6 +4,18 @@ All notable changes to the GFS distributed file system.
 
 ## [Unreleased]
 
+### Added
+
+- **Garbage collection for interrupted writes.** Pending files whose write was
+  interrupted (client crash, timeout, etc.) are now automatically cleaned up.
+  A background thread in the naming server deletes pending files older than 60
+  seconds (configurable via `cleanup_max_age`). Orphaned chunk data on storage
+  servers is deleted on a best-effort basis before removing the metadata.
+  - Added `created_at` timestamp column to the `files` table with automatic
+    migration for existing databases.
+  - `MetadataStore.list_stale_pending(max_age_seconds)` returns stale pending
+    files with full chunk location info.
+
 ### Fixed
 
 - **Performance: synchronous metrics collection degraded write throughput.**  
@@ -22,6 +34,15 @@ All notable changes to the GFS distributed file system.
     loop (every 5 seconds). Byte counters remain incremental.
   - `MetadataStore.list_committed_chunks()`: replaced N+1 per-chunk `SELECT`
     queries with a single `LEFT JOIN replicas` query.
+
+- **`CreateFile` timeout and message size for large files.**  
+  - `create_pending()` uses `executemany` with generator expressions instead
+    of per-row `execute()` calls (4M rows → single batch per table).
+  - SQLite: WAL journal mode and `synchronous=NORMAL` for better concurrent
+    read/write throughput during large transactions.
+  - gRPC message size limit raised from 4 MB to 256 MB (a 1 GB file produces
+    a ~90 MB `CreateFileResponse` with ~977K `ChunkPlacement` entries).
+  - CLI: `--timeout` flag (default 10s) to extend gRPC deadline for large files.
 
 ## [0.1.0] — 2026-06-22
 

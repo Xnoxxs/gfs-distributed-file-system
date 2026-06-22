@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass, field
 
 
@@ -33,7 +34,8 @@ CREATE TABLE IF NOT EXISTS files (
     filename   TEXT PRIMARY KEY,
     size       INTEGER NOT NULL,
     num_chunks INTEGER NOT NULL,
-    status     TEXT NOT NULL
+    status     TEXT NOT NULL,
+    created_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS chunks (
     chunk_id  TEXT PRIMARY KEY,
@@ -65,6 +67,13 @@ class MetadataStore:
         self._lock = threading.RLock()
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            # Migrate databases created before the created_at column was added.
+            cols = [r[1] for r in self._conn.execute(
+                "PRAGMA table_info(files)").fetchall()]
+            if "created_at" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE files ADD COLUMN created_at REAL "
+                    "NOT NULL DEFAULT 0")
             self._conn.commit()
 
     def close(self) -> None:
@@ -78,9 +87,9 @@ class MetadataStore:
             cur = self._conn.cursor()
             cur.execute("DELETE FROM files WHERE filename = ?", (filename,))
             cur.execute(
-                "INSERT INTO files(filename, size, num_chunks, status) "
-                "VALUES (?, ?, ?, 'pending')",
-                (filename, size, num_chunks),
+                "INSERT INTO files(filename, size, num_chunks, status, created_at) "
+                "VALUES (?, ?, ?, 'pending', ?)",
+                (filename, size, num_chunks, time.time()),
             )
             cur.executemany(
                 "INSERT INTO chunks(chunk_id, filename, idx) VALUES (?, ?, ?)",
@@ -198,3 +207,23 @@ class MetadataStore:
         if fm is None:
             return []
         return [(c.chunk_id, c.locations) for c in fm.chunks]
+
+    def list_stale_pending(self, max_age_seconds: float) -> list[FileMeta]:
+        """Return pending files older than `max_age_seconds` with full chunk
+        location info so the caller can clean up storage-server chunks before
+        deleting the metadata."""
+        cutoff = time.time() - max_age_seconds
+        with self._lock:
+            cur = self._conn.cursor()
+            rows = cur.execute(
+                "SELECT filename FROM files "
+                "WHERE status = 'pending' AND created_at < ?",
+                (cutoff,),
+            ).fetchall()
+        # get_file acquires the lock internally; fine for this low-frequency op.
+        result: list[FileMeta] = []
+        for (filename,) in rows:
+            fm = self.get_file(filename)
+            if fm is not None:
+                result.append(fm)
+        return result
