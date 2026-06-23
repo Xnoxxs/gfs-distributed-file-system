@@ -12,7 +12,8 @@ The three ideas from class:
 - **Separation of concerns:** the metadata/naming layer is independent from the storage layer.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the design and the full
-fault-tolerance analysis.
+fault-tolerance analysis, and [`docs/simulation.md`](docs/simulation.md) for
+manual load, large-file, failure, and network simulations.
 
 ---
 
@@ -56,7 +57,7 @@ Communication is **gRPC** (see [`proto/gfs.proto`](proto/gfs.proto)).
 ## Requirements / prerequisites
 
 - **Docker + Docker Compose** (recommended way to run everything), **or**
-- **Python 3.12+** to run locally / run the tests.
+- **Python 3.12+** and **uv** to run locally / run the tests.
 
 ---
 
@@ -157,19 +158,19 @@ the internal compose network. A client running on the host can connect with
 ## Run locally without Docker
 
 ```bash
-pip install -r requirements.txt
-python scripts/gen_proto.py            # generate gRPC stubs (gitignored)
+uv sync
+uv run python scripts/gen_proto.py     # generate gRPC stubs (gitignored)
 
 # in separate terminals:
-PORT=50051 METADATA_DB=./data/meta.db python -m gfs.naming_server
-PORT=50061 DATA_DIR=./data/s1 NAMING_SERVER=localhost:50051 ADVERTISE_ADDR=localhost:50061 python -m gfs.storage_server
-PORT=50062 DATA_DIR=./data/s2 NAMING_SERVER=localhost:50051 ADVERTISE_ADDR=localhost:50062 python -m gfs.storage_server
-PORT=50063 DATA_DIR=./data/s3 NAMING_SERVER=localhost:50051 ADVERTISE_ADDR=localhost:50063 python -m gfs.storage_server
-PORT=50064 DATA_DIR=./data/s4 NAMING_SERVER=localhost:50051 ADVERTISE_ADDR=localhost:50064 python -m gfs.storage_server
+PORT=50051 METADATA_DB=./data/meta.db uv run python -m gfs.naming_server
+PORT=50061 DATA_DIR=./data/s1 NAMING_SERVER=localhost:50051 ADVERTISE_ADDR=localhost:50061 uv run python -m gfs.storage_server
+PORT=50062 DATA_DIR=./data/s2 NAMING_SERVER=localhost:50051 ADVERTISE_ADDR=localhost:50062 uv run python -m gfs.storage_server
+PORT=50063 DATA_DIR=./data/s3 NAMING_SERVER=localhost:50051 ADVERTISE_ADDR=localhost:50063 uv run python -m gfs.storage_server
+PORT=50064 DATA_DIR=./data/s4 NAMING_SERVER=localhost:50051 ADVERTISE_ADDR=localhost:50064 uv run python -m gfs.storage_server
 
 # then use the client:
-NAMING_SERVER=localhost:50051 python -m gfs.client create samples/hello.txt hello.txt
-NAMING_SERVER=localhost:50051 python -m gfs.client read hello.txt
+NAMING_SERVER=localhost:50051 uv run python -m gfs.client create samples/hello.txt hello.txt
+NAMING_SERVER=localhost:50051 uv run python -m gfs.client read hello.txt
 ```
 
 (On Windows PowerShell, set env vars with `$env:PORT="50051"` before each command.)
@@ -183,11 +184,11 @@ process and exercise create / read / size / delete, storage-server failure,
 and self-healing back to the target replication factor:
 
 ```bash
-python scripts/gen_proto.py
-python tests/test_gfs.py
+uv run python scripts/gen_proto.py
+uv run pytest
 ```
 
-Expected: `6/6 tests passed`.
+Expected: all tests pass.
 
 ---
 
@@ -200,9 +201,10 @@ gfs/naming_server/         master: metadata store (SQLite) + gRPC service
 gfs/storage_server/        chunkserver: stores chunk files + heartbeats
 gfs/client/                client library + CLI
 scripts/gen_proto.py       generates the gRPC stubs (into gfs/_generated/)
-tests/test_gfs.py          end-to-end tests incl. fault tolerance
+tests/                     pytest integration, fault-tolerance, and persistence tests
 docker-compose.yml         1 naming + 4 storage + client helper
 Dockerfile                 single image for all roles
 docs/ARCHITECTURE.md       design + fault-tolerance analysis
+docs/simulation.md         manual simulation commands and scenarios
 docs/requirements.md       the assignment
 ```
