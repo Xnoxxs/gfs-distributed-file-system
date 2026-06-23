@@ -53,6 +53,19 @@ All notable changes to the GFS distributed file system.
     a ~90 MB `CreateFileResponse` with ~977K `ChunkPlacement` entries).
   - CLI: `--timeout` flag (default 10s) to extend gRPC deadline for large files.
 
+- **Write throughput: ~193 KB/s per server → ~2–6 MB/s.**  
+  The client opened a new TCP connection (`grpc.insecure_channel`) for every
+  single 1 KB chunk write — ~2.93M connections for a 1 GB file with replication
+  factor 3. Additionally, replicas were written sequentially (chunk → s1, then
+  s2, then s3).
+
+  - Client groups writes by target storage server and opens one persistent gRPC
+    channel per server (connection reuse).
+  - Replicas are uploaded to all storage servers in parallel via
+    `ThreadPoolExecutor`.
+  - Each server's writes remain sequential (unary gRPC calls on one channel),
+    but the per-server uploads run concurrently.
+
 ## [0.1.0] — 2026-06-22
 
 ### Added
