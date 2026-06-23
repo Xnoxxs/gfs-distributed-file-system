@@ -310,6 +310,13 @@ class NamingServicer(gfs_pb2_grpc.NamingServerServicer):
             return gfs_pb2.ListFilesResponse(files=files)
         return metrics.observe_rpc("naming", "ListFiles", handle)
 
+    # ---------- orphan cleanup ----------
+    def ListExpectedChunks(self, request, context):
+        def handle():
+            ids = self._store.list_chunk_ids_for(request.address)
+            return gfs_pb2.ListExpectedChunksResponse(ok=True, chunk_ids=ids)
+        return metrics.observe_rpc("naming", "ListExpectedChunks", handle)
+
     def _refresh_cluster_metrics(self) -> None:
         live = set(self._registry.live_servers())
         metrics.NAMING_LIVE_STORAGE.set(len(live))

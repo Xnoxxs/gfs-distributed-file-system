@@ -127,6 +127,46 @@ def _get_chunk_from(address: str, chunk_id: str) -> bytes | None:
         return None
 
 
+def _cleanup_orphans_once(naming_addr: str, self_addr: str,
+                          servicer: StorageServicer) -> None:
+    """One-shot: delete chunks on disk that the naming server does not know
+    about (orphans left behind by self-healing replica migration)."""
+    time.sleep(2)  # Give the heartbeat loop time to register.
+    try:
+        with grpc.insecure_channel(
+            naming_addr,
+            options=[
+                ("grpc.max_receive_message_length", 256 * 1024 * 1024),
+                ("grpc.max_send_message_length", 256 * 1024 * 1024),
+            ],
+        ) as channel:
+            stub = gfs_pb2_grpc.NamingServerStub(channel)
+            resp = stub.ListExpectedChunks(
+                gfs_pb2.ListExpectedChunksRequest(address=self_addr),
+                timeout=30,
+            )
+            if not resp.ok:
+                return
+            expected = set(resp.chunk_ids)
+            on_disk = set(servicer.held_chunk_ids())
+            orphans = on_disk - expected
+            if not orphans:
+                return
+            for chunk_id in orphans:
+                try:
+                    os.remove(servicer._path(chunk_id))
+                except FileNotFoundError:
+                    pass
+            logger.info(
+                "orphan cleanup: removed %d chunk(s) no longer in metadata",
+                len(orphans),
+            )
+            servicer.refresh_metrics()
+    except grpc.RpcError as exc:
+        logger.warning("orphan cleanup skipped (naming unreachable): %s",
+                       exc.code())
+
+
 def _heartbeat_loop(naming_addr: str, self_addr: str,
                     servicer: StorageServicer) -> None:
     """Register once, then heartbeat forever so the master tracks liveness."""
@@ -184,6 +224,15 @@ def serve() -> None:
         daemon=True,
     )
     hb.start()
+
+    # One-shot orphan cleanup after registration.
+    cleanup = threading.Thread(
+        target=_cleanup_orphans_once,
+        args=(naming_addr, self_addr, servicer),
+        daemon=True,
+    )
+    cleanup.start()
+
     server.wait_for_termination()
 
 

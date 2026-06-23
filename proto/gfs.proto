@@ -23,6 +23,10 @@ service NamingServer {
   rpc DeleteFile(DeleteFileRequest) returns (DeleteFileResponse);
   rpc GetFileSize(GetFileSizeRequest) returns (GetFileSizeResponse);
   rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
+  // ListExpectedChunks returns the chunk IDs that a storage server should hold
+  // according to metadata.  Used by storage servers at startup to clean up
+  // orphan chunks left behind by self-healing replica migration.
+  rpc ListExpectedChunks(ListExpectedChunksRequest) returns (ListExpectedChunksResponse);
 }
 
 // =====================================================================
@@ -159,4 +163,13 @@ message ReplicateChunkRequest {
 message ReplicateChunkResponse {
   bool ok = 1;
   string message = 2;
+}
+
+// ---------- orphan cleanup ----------
+message ListExpectedChunksRequest {
+  string address = 1; // storage server address to query for
+}
+message ListExpectedChunksResponse {
+  bool ok = 1;
+  repeated string chunk_ids = 2;
 }

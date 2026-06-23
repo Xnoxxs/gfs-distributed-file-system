@@ -6,6 +6,15 @@ All notable changes to the GFS distributed file system.
 
 ### Added
 
+- **Orphan chunk cleanup at storage server startup.** When a storage server
+  starts, it queries the naming server for the list of chunk IDs it *should*
+  hold (via the new `ListExpectedChunks` RPC) and deletes any chunks on disk
+  that are no longer in metadata. This reclaims disk space wasted by replica
+  migrations during self-healing — when a failed server returns, the chunks
+  that were moved to other servers are no longer needed locally.
+  - New RPC: `NamingServer.ListExpectedChunks(address) → chunk_ids`
+  - New metadata query: `MetadataStore.list_chunk_ids_for(address)`
+
 - **Garbage collection for interrupted writes.** Pending files whose write was
   interrupted (client crash, timeout, etc.) are now automatically cleaned up.
   A background thread in the naming server deletes pending files older than 60

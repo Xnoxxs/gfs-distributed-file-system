@@ -208,6 +208,16 @@ class MetadataStore:
             return []
         return [(c.chunk_id, c.locations) for c in fm.chunks]
 
+    def list_chunk_ids_for(self, address: str) -> list[str]:
+        """Return all chunk IDs that metadata says should be stored at
+        `address`.  Used by storage servers at startup to find orphans."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT chunk_id FROM replicas WHERE address = ?",
+                (address,),
+            ).fetchall()
+            return [r[0] for r in rows]
+
     def list_stale_pending(self, max_age_seconds: float) -> list[FileMeta]:
         """Return pending files older than `max_age_seconds` with full chunk
         location info so the caller can clean up storage-server chunks before
