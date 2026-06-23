@@ -68,13 +68,14 @@ class GFSClient:
                         (placement.chunk_id, payload))
 
             # Write to all storage servers in parallel.  Within each server
-            # writes are sequential (gRPC unary calls on one channel), but
-            # each server gets its own thread.
+            # writes are pipelined (HTTP/2 multiplexing on one channel) so
+            # large files don't incur N sequential round-trips per replica.
             def _upload(addr: str, writes: list[tuple[str, bytes]]) -> None:
                 opts = self._channel_options()
                 with grpc.insecure_channel(addr, options=opts) as ch:
                     stub = gfs_pb2_grpc.StorageServerStub(ch)
-                    for chunk_id, payload in writes:
+
+                    def _write_one(chunk_id: str, payload: bytes) -> None:
                         resp = stub.StoreChunk(
                             gfs_pb2.StoreChunkRequest(
                                 chunk_id=chunk_id, data=payload),
@@ -84,6 +85,18 @@ class GFSClient:
                             raise GFSError(
                                 f"failed chunk {chunk_id[:8]}… on {addr}: "
                                 f"{resp.message}")
+
+                    # Up to 16 concurrent writes per server (matches server
+                    # thread-pool size).  gRPC Python channels are thread-safe
+                    # and HTTP/2 multiplexes streams over one TCP connection.
+                    workers = min(16, len(writes))
+                    with ThreadPoolExecutor(max_workers=workers) as wp:
+                        futs = [
+                            wp.submit(_write_one, cid, data)
+                            for cid, data in writes
+                        ]
+                        for fut in as_completed(futs):
+                            fut.result()
 
             with ThreadPoolExecutor(max_workers=len(by_addr)) as pool:
                 futs = {
@@ -111,15 +124,23 @@ class GFSClient:
             if not resp.ok:
                 raise GFSError(resp.message)
 
-            parts: list[bytes] = []
-            for placement in sorted(resp.placements, key=lambda p: p.index):
+            placements = sorted(resp.placements, key=lambda p: p.index)
+
+            def _fetch_one(placement):
                 data = self._fetch_chunk_any(placement)
                 if data is None:
                     raise GFSError(
                         f"chunk {placement.index} unavailable: all "
                         f"{len(placement.locations)} replicas unreachable")
-                parts.append(data)
-            return b"".join(parts)
+                return placement.index, data
+
+            # Pipeline up to 16 concurrent chunk reads (HTTP/2 multiplexing).
+            with ThreadPoolExecutor(max_workers=min(16, len(placements))) as pool:
+                results = list(pool.map(_fetch_one, placements))
+
+            # Reassemble in chunk-index order.
+            results.sort(key=lambda r: r[0])
+            return b"".join(data for _, data in results)
         finally:
             channel.close()
 

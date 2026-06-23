@@ -87,9 +87,10 @@ class NamingServicer(gfs_pb2_grpc.NamingServerServicer):
             target=self._metrics_loop, daemon=True)
         self._metrics_thread.start()
         # Background cleanup of pending files left behind by interrupted writes.
-        self._cleanup_thread = threading.Thread(
-            target=self._cleanup_loop, args=(cleanup_interval,), daemon=True)
-        self._cleanup_thread.start()
+        if cleanup_max_age > 0:
+            self._cleanup_thread = threading.Thread(
+                target=self._cleanup_loop, args=(cleanup_interval,), daemon=True)
+            self._cleanup_thread.start()
 
     # ---------- membership ----------
     def RegisterStorage(self, request, context):
@@ -322,12 +323,16 @@ class NamingServicer(gfs_pb2_grpc.NamingServerServicer):
         metrics.NAMING_LIVE_STORAGE.set(len(live))
 
         files_by_status = {"pending": 0, "committed": 0}
+        committed_bytes = 0
         for file_meta in self._store.list_files():
             files_by_status[file_meta.status] = (
                 files_by_status.get(file_meta.status, 0) + 1
             )
+            if file_meta.status == "committed":
+                committed_bytes += file_meta.size
         for status, count in files_by_status.items():
             metrics.NAMING_FILES.labels(status).set(count)
+        metrics.NAMING_FILES_BYTES.set(committed_bytes)
 
         committed_chunks = self._store.list_committed_chunks()
         metrics.NAMING_COMMITTED_CHUNKS.set(len(committed_chunks))
@@ -387,6 +392,8 @@ def serve() -> None:
         "REPLICATION_FACTOR", config.DEFAULT_REPLICATION_FACTOR))
     heal_interval = float(os.environ.get(
         "HEAL_INTERVAL", config.HEAL_INTERVAL))
+    cleanup_max_age = float(os.environ.get(
+        "CLEANUP_MAX_AGE", "60"))
 
     os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
     metrics.start_metrics_server_from_env()
@@ -400,7 +407,8 @@ def serve() -> None:
         ],
     )
     gfs_pb2_grpc.add_NamingServerServicer_to_server(
-        NamingServicer(store, replication, heal_interval=heal_interval), server)
+        NamingServicer(store, replication, heal_interval=heal_interval,
+                       cleanup_max_age=cleanup_max_age), server)
     server.add_insecure_port(f"[::]:{port}")
     server.start()
     logger.info(

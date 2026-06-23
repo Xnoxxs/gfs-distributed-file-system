@@ -29,8 +29,12 @@ class StorageServicer(gfs_pb2_grpc.StorageServerServicer):
         self._data_dir = data_dir
         self._address = address
         os.makedirs(data_dir, exist_ok=True)
-        self._lock = threading.Lock()
-        self.refresh_metrics()
+        # Incremental counters so refresh_metrics() never scans the whole
+        # directory on every heartbeat (O(chunks) → O(1)).
+        self._chunk_count = 0
+        self._total_bytes = 0
+        self._counters_lock = threading.Lock()
+        self._sync_counters_from_disk()
 
     def _path(self, chunk_id: str) -> str:
         # chunk_id is a uuid hex string -> safe as a filename.
@@ -40,31 +44,56 @@ class StorageServicer(gfs_pb2_grpc.StorageServerServicer):
         return [f[:-6] for f in os.listdir(self._data_dir)
                 if f.endswith(".chunk")]
 
-    def refresh_metrics(self) -> None:
+    def _sync_counters_from_disk(self) -> None:
+        """One-shot: scan disk to initialise counters (only at startup)."""
         chunks = self.held_chunk_ids()
-        total_bytes = 0
-        for chunk_id in chunks:
+        total = 0
+        for cid in chunks:
             try:
-                total_bytes += os.path.getsize(self._path(chunk_id))
+                total += os.path.getsize(self._path(cid))
             except FileNotFoundError:
                 pass
-        metrics.STORAGE_CHUNKS.labels(self._address).set(len(chunks))
-        metrics.STORAGE_BYTES.labels(self._address).set(total_bytes)
+        self._chunk_count = len(chunks)
+        self._total_bytes = total
+        self._publish_metrics()
+
+    def _publish_metrics(self) -> None:
+        metrics.STORAGE_CHUNKS.labels(self._address).set(self._chunk_count)
+        metrics.STORAGE_BYTES.labels(self._address).set(self._total_bytes)
+
+    def refresh_metrics(self) -> None:
+        """Publish current counters (O(1) — no disk scan)."""
+        self._publish_metrics()
 
     def StoreChunk(self, request, context):
         def handle():
             path = self._path(request.chunk_id)
+            size = len(request.data)
             try:
-                with self._lock:
-                    # Atomic write: temp file then rename.
-                    tmp = path + ".tmp"
-                    with open(tmp, "wb") as fh:
-                        fh.write(request.data)
-                    os.replace(tmp, path)
+                # Each chunk_id is a unique UUID — writes to different chunks
+                # never conflict, so no global lock is needed.  temp-file +
+                # atomic rename is safe even when two threads write to the same
+                # chunk_id (the last rename wins, which is fine for a
+                # fixed-content idempotent write).
+                try:
+                    old_size = os.path.getsize(path)
+                except FileNotFoundError:
+                    old_size = -1  # new chunk
+
+                tmp = path + ".tmp"
+                with open(tmp, "wb") as fh:
+                    fh.write(request.data)
+                os.replace(tmp, path)
+
+                with self._counters_lock:
+                    if old_size == -1:
+                        self._chunk_count += 1
+                        self._total_bytes += size
+                    else:
+                        self._total_bytes += size - old_size
                 metrics.STORAGE_CHUNK_BYTES_WRITTEN.labels(
-                    self._address).inc(len(request.data))
-                logger.info("stored chunk %s (%d bytes)", request.chunk_id,
-                            len(request.data))
+                    self._address).inc(size)
+                logger.info("stored chunk %s (%d bytes)", request.chunk_id, size)
                 return gfs_pb2.StoreChunkResponse(ok=True, message="stored")
             except OSError as exc:
                 logger.error("store chunk %s failed: %s", request.chunk_id, exc)
@@ -91,7 +120,11 @@ class StorageServicer(gfs_pb2_grpc.StorageServerServicer):
         def handle():
             path = self._path(request.chunk_id)
             try:
+                old_size = os.path.getsize(path)
                 os.remove(path)
+                with self._counters_lock:
+                    self._chunk_count -= 1
+                    self._total_bytes -= old_size
                 logger.info("deleted chunk %s", request.chunk_id)
             except FileNotFoundError:
                 pass  # already gone; deletion is idempotent
@@ -161,7 +194,8 @@ def _cleanup_orphans_once(naming_addr: str, self_addr: str,
                 "orphan cleanup: removed %d chunk(s) no longer in metadata",
                 len(orphans),
             )
-            servicer.refresh_metrics()
+            # Re-sync counters once after cleanup (one-time cost at startup).
+            servicer._sync_counters_from_disk()
     except grpc.RpcError as exc:
         logger.warning("orphan cleanup skipped (naming unreachable): %s",
                        exc.code())
@@ -181,7 +215,9 @@ def _heartbeat_loop(naming_addr: str, self_addr: str,
                     stub.Heartbeat(
                         gfs_pb2.HeartbeatRequest(
                             address=self_addr,
-                            chunk_ids=servicer.held_chunk_ids()),
+                            # naming server ignores chunk_ids; skip O(n)
+                            # listdir on every heartbeat.
+                            chunk_ids=[]),
                         timeout=5)
                     servicer.refresh_metrics()
                     metrics.STORAGE_HEARTBEATS.labels(self_addr).inc()

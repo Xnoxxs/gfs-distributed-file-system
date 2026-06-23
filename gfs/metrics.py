@@ -38,6 +38,10 @@ NAMING_COMMITTED_CHUNKS = Gauge(
     "gfs_naming_committed_chunks_total",
     "Number of chunks belonging to committed files.",
 )
+NAMING_FILES_BYTES = Gauge(
+    "gfs_naming_files_bytes_total",
+    "Total logical bytes of committed files (not counting replication).",
+)
 NAMING_UNDER_REPLICATED_CHUNKS = Gauge(
     "gfs_naming_under_replicated_chunks",
     "Committed chunks with fewer than the target number of live replicas.",

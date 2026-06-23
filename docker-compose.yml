@@ -16,6 +16,7 @@ services:
       METADATA_DB: "/data/metadata.db"
       REPLICATION_FACTOR: "3"
       METRICS_PORT: "8000"
+      CLEANUP_MAX_AGE: "0"  # 0 = disable stale-pending cleanup
     ports:
       - "50051:50051"   # exposed so a client on the host can connect too
     volumes:
@@ -91,6 +92,7 @@ services:
       NAMING_SERVER: "naming:50051"
     volumes:
       - ./samples:/samples
+      - ./scripts:/scripts:ro
     depends_on:
       - naming
 

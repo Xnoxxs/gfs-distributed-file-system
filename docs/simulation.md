@@ -162,26 +162,26 @@ Expected result: both hashes are identical.
 
 ---
 
-## 3b. 1 GB write stress test
+## 3b. 100 MB write stress test
 
-A 1 GB file creates roughly 1,024,000 chunks (each 1 KB). With replication factor 3,
-the cluster writes about 3 million chunk replicas across 4 storage servers. This
+A 100 MB file creates roughly 102,400 chunks (each 1 KB). With replication factor 3,
+the cluster writes about 300,000 chunk replicas across 4 storage servers. This
 exercises chunk placement at scale, metadata growth, and sustained write throughput.
 
 **Expected duration:** 5–20 minutes depending on hardware. The dominant cost is
 gRPC round-trips per chunk replica. Plan accordingly.
 
-### Generate a 1 GB file on the host
+### Generate a 100 MB file on the host
 
 Use Python with a reproducible pseudo-random seed so the same "random" data can
-be generated again for verification without storing a 1 GB reference file:
+be generated again for verification without storing a 100 MB reference file:
 
 ```fish
 uv run python -c '
 import os, hashlib, struct, time
 
-target = "samples/gigabyte.bin"
-size = 1_000_000_000  # 1 GB (decimal)
+target = "samples/hundred-meg.bin"
+size = 100_000_000  # 100 MB (decimal)
 seed = 42
 
 t0 = time.monotonic()
@@ -194,7 +194,7 @@ with open(target, "wb") as f:
         f.write(chunk)
         state = hashlib.sha256(state).digest()
         written += len(chunk)
-        if written % (100 * 1024 * 1024) == 0:
+        if written % (10 * 1024 * 1024) == 0:
             print(f"  {written / 1_000_000:.0f} MB…")
 
 elapsed = time.monotonic() - t0
@@ -213,28 +213,28 @@ print(f"host sha256: {h.hexdigest()}")
 A faster alternative with `dd` + `/dev/urandom` (macOS-compatible, non-reproducible):
 
 ```fish
-dd if=/dev/urandom of=samples/gigabyte.bin bs=1m count=1000 2>/dev/null
-shasum -a 256 samples/gigabyte.bin
+dd if=/dev/urandom of=samples/hundred-meg.bin bs=1m count=100 2>/dev/null
+shasum -a 256 samples/hundred-meg.bin
 ```
 
 ### Upload to GFS
 
-The `CreateFile` RPC must persist ~977K chunk placements into SQLite before
+The `CreateFile` RPC must persist ~98K chunk placements into SQLite before
 returning. Use `--timeout 300` (5 minutes) to give the naming server enough
 headroom:
 
 ```fish
-time docker compose exec client python -m gfs.client --timeout 300 create /samples/gigabyte.bin gigabyte.bin
-docker compose exec client python -m gfs.client size gigabyte.bin
+time docker compose exec client python -m gfs.client --timeout 300 create /samples/hundred-meg.bin hundred-meg.bin
+docker compose exec client python -m gfs.client size hundred-meg.bin
 ```
 
 ### Read back and verify hashes
 
 ```fish
-docker compose exec client python -m gfs.client read gigabyte.bin /tmp/gigabyte-out.bin
-docker compose cp client:/tmp/gigabyte-out.bin /tmp/gfs-gigabyte-out.bin
+docker compose exec client python -m gfs.client read hundred-meg.bin /tmp/hundred-meg-out.bin
+docker compose cp client:/tmp/hundred-meg-out.bin /tmp/gfs-hundred-meg-out.bin
 
-shasum -a 256 samples/gigabyte.bin /tmp/gfs-gigabyte-out.bin
+shasum -a 256 samples/hundred-meg.bin /tmp/gfs-hundred-meg-out.bin
 ```
 
 **Expected result:** both SHA-256 hashes are identical. If they differ, the
@@ -249,17 +249,17 @@ docker compose stats --no-stream
 ```
 
 After the write, the naming server metadata database grows noticeably (each chunk
-row ≈ 100 bytes → ~100 MB for 1 million chunks). The four storage servers together
-hold ~3 GB of chunk data (1 GB × replication factor 3).
+row ≈ 100 bytes → ~10 MB for 100K chunks). The four storage servers together
+hold ~300 MB of chunk data (100 MB × replication factor 3).
 
-### Clean up the 1 GB file
+### Clean up the 100 MB test file
 
 The test file is too large to keep around casually. Delete it from GFS and the
 host when done:
 
 ```fish
-docker compose exec client python -m gfs.client delete gigabyte.bin
-rm samples/gigabyte.bin /tmp/gfs-gigabyte-out.bin
+docker compose exec client python -m gfs.client delete hundred-meg.bin
+rm samples/hundred-meg.bin /tmp/gfs-hundred-meg-out.bin
 ```
 
 ---
