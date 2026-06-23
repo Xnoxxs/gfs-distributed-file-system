@@ -8,6 +8,7 @@ the master, bulk data straight to the chunkservers).
 from __future__ import annotations
 
 import grpc
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from gfs import config
 from gfs._generated import gfs_pb2, gfs_pb2_grpc
@@ -56,16 +57,41 @@ class GFSClient:
             if not resp.ok:
                 raise GFSError(f"create rejected: {resp.message}")
 
-            # Upload every chunk to *all* of its assigned replica locations.
-            # All replicas must accept the write, otherwise the configured
-            # replication factor would not be met.
+            # Group writes by target storage server so we can use one
+            # persistent gRPC channel per server instead of opening a new TCP
+            # connection for every 1 KB chunk.
+            by_addr: dict[str, list[tuple[str, bytes]]] = {}
             for placement in resp.placements:
                 payload = chunks[placement.index]
                 for addr in placement.locations:
-                    if not _store_chunk(addr, placement.chunk_id, payload):
-                        raise GFSError(
-                            f"failed to write chunk {placement.index} "
-                            f"replica on {addr}; aborting")
+                    by_addr.setdefault(addr, []).append(
+                        (placement.chunk_id, payload))
+
+            # Write to all storage servers in parallel.  Within each server
+            # writes are sequential (gRPC unary calls on one channel), but
+            # each server gets its own thread.
+            def _upload(addr: str, writes: list[tuple[str, bytes]]) -> None:
+                opts = self._channel_options()
+                with grpc.insecure_channel(addr, options=opts) as ch:
+                    stub = gfs_pb2_grpc.StorageServerStub(ch)
+                    for chunk_id, payload in writes:
+                        resp = stub.StoreChunk(
+                            gfs_pb2.StoreChunkRequest(
+                                chunk_id=chunk_id, data=payload),
+                            timeout=10,
+                        )
+                        if not resp.ok:
+                            raise GFSError(
+                                f"failed chunk {chunk_id[:8]}… on {addr}: "
+                                f"{resp.message}")
+
+            with ThreadPoolExecutor(max_workers=len(by_addr)) as pool:
+                futs = {
+                    pool.submit(_upload, addr, writes): addr
+                    for addr, writes in by_addr.items()
+                }
+                for fut in as_completed(futs):
+                    fut.result()  # raises on first failure, cancels the rest
 
             commit = naming.CommitFile(
                 gfs_pb2.CommitFileRequest(filename=filename),
